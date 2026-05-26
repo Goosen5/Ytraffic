@@ -7,6 +7,7 @@ from threading import Lock
 import pandas as pd
 from flask import Flask, jsonify, request
 from flask_cors import CORS
+from sklearn.metrics import r2_score
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 SRC_DIR = BASE_DIR / "src"
@@ -18,6 +19,8 @@ from predictor.decisionTree.decisionTree import TrafficDecisionTreeModel
 
 
 TRAINING_DATA_PATH = BASE_DIR / "assets" / "training" / "traffic_per_stop.csv"
+TEST_DATA_PATH = BASE_DIR / "assets" / "test" / "traffic_per_stop.csv"
+WEATHER_DATA_PATH = BASE_DIR / "assets" / "datas.csv"
 
 STOPS_BY_ID = {stop["stop_id"]: stop for stop in STOPS}
 VALID_GRANULARITIES = {"week", "month", "year"}
@@ -34,10 +37,24 @@ MONTH_LABELS = ["Jan", "Fev", "Mar", "Avr", "Mai", "Juin", "Juil", "Aou", "Sep",
 
 decision_tree_model = None
 model_lock = Lock()
+weather_df = None
+weather_max_year = None
+model_score = None
 
 
 def load_training_data():
     df = pd.read_csv(TRAINING_DATA_PATH, low_memory=False)
+    return df.rename(
+        columns={
+            "stop_id": "station_code",
+            "stop_name": "station_name",
+            "traffic": "value",
+        }
+    )
+
+
+def load_test_data():
+    df = pd.read_csv(TEST_DATA_PATH, low_memory=False)
     return df.rename(
         columns={
             "stop_id": "station_code",
@@ -53,11 +70,39 @@ def initialize_decision_tree_model():
     return model
 
 
+def load_weather_data():
+    df = pd.read_csv(WEATHER_DATA_PATH)
+    df["datetime"] = pd.to_datetime(df["AAAAMMJJHH"].astype(str), format="%Y%m%d%H", errors="coerce")
+    df = df.dropna(subset=["datetime"])
+    df["date"] = df["datetime"].dt.strftime("%Y-%m-%d")
+    df["hour"] = df["datetime"].dt.hour
+    df["T"] = pd.to_numeric(df["T"], errors="coerce")
+    df["U"] = pd.to_numeric(df["U"], errors="coerce")
+    df["RR1"] = pd.to_numeric(df["RR1"], errors="coerce")
+    return df[["date", "hour", "T", "U", "RR1"]]
+
+
+def compute_model_score(model):
+    df = load_test_data()
+    predictions = model.predict(df)
+    return float(r2_score(df["value"], predictions))
+
+
+def fallback_weather_date(date_str):
+    year = int(date_str[:4])
+    if weather_max_year is not None and year > weather_max_year:
+        return f"{weather_max_year}{date_str[4:]}"
+    return date_str
+
+
 def create_app():
     app = Flask(__name__)
 
-    global decision_tree_model
+    global decision_tree_model, weather_df, weather_max_year, model_score
     decision_tree_model = initialize_decision_tree_model()
+    weather_df = load_weather_data()
+    weather_max_year = int(weather_df["date"].str[:4].astype(int).max())
+    model_score = compute_model_score(decision_tree_model)
 
     if CORS is not None:
         CORS(app, resources={r"/api/*": {"origins": "*"}})
@@ -87,6 +132,10 @@ def create_app():
 
         response = aggregate_predictions(prediction_df, predictions, granularity)
         return jsonify(response)
+
+    @app.get("/api/model_score")
+    def get_model_score():
+        return jsonify({"score": model_score})
 
     return app
 
@@ -181,15 +230,30 @@ def get_chart_points_dates(granularity, selected_date):
 
 
 def aggregate_predictions(prediction_df, predictions, granularity):
-    df = prediction_df[["label"]].copy()
+    df = prediction_df[["label", "date", "hour"]].copy()
     df["affluence"] = predictions
 
-    grouped = df.groupby("label", sort=False)["affluence"].mean()
+    df["weather_date"] = df["date"].apply(fallback_weather_date)
+    weather_lookup = weather_df.rename(columns={"date": "weather_date"})
+    df = df.merge(weather_lookup, on=["weather_date", "hour"], how="left")
 
-    return [
-        {"label": label, "affluence": int(round(float(affluence)))}
-        for label, affluence in grouped.items()
-    ]
+    grouped = df.groupby("label", sort=False).agg(
+        affluence=("affluence", "mean"),
+        temperature=("T", "mean"),
+        humidity=("U", "mean"),
+        rain=("RR1", "sum"),
+    )
+
+    result = []
+    for label, row in grouped.iterrows():
+        result.append({
+            "label": label,
+            "affluence": int(round(float(row["affluence"]))),
+            "temperature": None if pd.isna(row["temperature"]) else round(float(row["temperature"]), 1),
+            "humidity": None if pd.isna(row["humidity"]) else int(round(float(row["humidity"]))),
+            "rain": None if pd.isna(row["rain"]) else round(float(row["rain"]), 1),
+        })
+    return result
 
 
 app = create_app()
