@@ -8,9 +8,6 @@ import imageio.v2 as imageio
 from decisionTree import TrafficDecisionTreeModel
 from tqdm import tqdm
 
-# =========================
-# PATHS
-# =========================
 BASE = "graphs"
 FRAMES = f"{BASE}/frames"
 GIFS = f"{BASE}/gifs"
@@ -30,9 +27,6 @@ metrics = [
 for m in metrics:
     os.makedirs(f"{FRAMES}/{m}", exist_ok=True)
 
-# =========================
-# DATA
-# =========================
 train_df = pd.read_csv("assets/training/traffic_per_stop.csv", low_memory=False)
 test_df = pd.read_csv("assets/test/traffic_per_stop.csv", low_memory=False)
 
@@ -44,15 +38,9 @@ train_df.columns = test_df.columns = [
 
 test_df["datetime"] = pd.to_datetime(test_df["datetime"], errors="coerce")
 
-# =========================
-# BASELINE (CRUCIAL FIX)
-# =========================
 baseline_value = test_df["value"].mean()
 baseline_mae = (test_df["value"] - baseline_value).abs().mean()
 
-# =========================
-# REFERENCE HEATMAP STRUCTURE
-# =========================
 ref_df = test_df.copy()
 ref_df["datetime"] = pd.to_datetime(ref_df["datetime"], errors="coerce")
 ref_df["hour"] = ref_df["datetime"].dt.hour
@@ -68,9 +56,6 @@ station_order = pivot_reference.columns
 vmin = pivot_reference.min().min()
 vmax = pivot_reference.max().max()
 
-# =========================
-# STORAGE
-# =========================
 gif_frames = {m: [] for m in metrics}
 accuracy_history = []
 
